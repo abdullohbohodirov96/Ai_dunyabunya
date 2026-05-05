@@ -295,10 +295,20 @@ def send_telegram(text: str, chat_id: str = None) -> bool:
 
 
 def format_analysis_message(lead: dict, ai: dict) -> str:
-    """Chiroyli Telegram xabar formatlash."""
-    lead_name = lead.get("lead_name") or "Noma'lum"
+    """Chiroyli Telegram xabar formatlash - yangi talablar bo'yicha."""
     lead_id = lead.get("lead_id") or "—"
-    operator = lead.get("operator_name") or lead.get("operator_id") or "—"
+    lead_name = lead.get("lead_name")
+    if not lead_name or lead_name == "Yo'q": lead_name = "Noma'lum"
+    
+    phone = lead.get("phone")
+    if not phone or phone == "Yo'q": phone = "Telefon topilmadi"
+    
+    operator_name = lead.get("operator_name")
+    if not operator_name or operator_name == lead.get("operator_id"): operator_name = "Operator topilmadi"
+    
+    operator_id = lead.get("operator_id") or "—"
+    lead_url = lead.get("lead_url") or "—"
+    comment = lead.get("comment") or "—"
 
     # Urgent Alert tekshiruvi
     score_val = ai.get("score", "0/5")
@@ -310,35 +320,38 @@ def format_analysis_message(lead: dict, ai: dict) -> str:
         urgent_prefix = "🔥🔥🔥 *ISSIQ LEAD! TEZ JAVOB BERING!*\n\n"
 
     lines = [
-        urgent_prefix + "🔔 *Yangi Lead Tahlili*",
+        f"{urgent_prefix}🔔 *Yangi Lead Tahlili*",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        f"👤 *Lead:* {lead_name}",
         f"🆔 *Lead ID:* {lead_id}",
-    ]
-    if lead.get("lead_url"):
-        lines.append(f"🔗 *CRM:* {lead['lead_url']}")
-    if lead.get("phone"):
-        lines.append(f"📞 *Telefon:* {lead['phone']}")
-    lines.append(f"👨‍💼 *Operator:* {operator}")
-    if lead.get("comment"):
-        comment_short = lead["comment"][:150]
-        if len(lead["comment"]) > 150:
-            comment_short += "..."
-        lines.append(f"✍️ *Izoh:* {comment_short}")
-
-    lines += [
+        f"👤 *Mijoz:* {lead_name}",
+        f"📞 *Telefon:* {phone}",
+        f"👨‍💼 *Operator:* {operator_name}",
+        f"🆔 *Operator ID:* {operator_id}",
+        f"🔗 *CRM link:* {lead_url}",
+        "",
+        "✍️ *Operator izohi:*",
+        f"{comment}",
         "",
         "━━━━━━━━━━━━━━━━━━━━",
+        "🧠 *AI tahlil:*",
         "",
         f"📊 *Lead bahosi:* {ai.get('score', '?/5')}",
         f"🔥 *Lead holati:* {ai.get('status', 'noaniq')}",
         f"❌ *Operator xatosi:* {ai.get('operator_error', '—')}",
         f"❓ *Keyingi savol:* {ai.get('next_question', '—')}",
         f"✅ *Tavsiya:* {ai.get('recommendation', '—')}",
-        "",
-        "💬 *Tayyor javob (copy-paste):*",
-        f"`{ai.get('ready_answer', '—')}`",
+    ]
+
+    ready_answer = ai.get("ready_answer")
+    if ready_answer and ready_answer.strip():
+        lines += [
+            "",
+            "💬 *Tayyor javob (copy-paste):*",
+            f"`{ready_answer}`",
+        ]
+
+    lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         f"📌 _Manba: amoCRM Webhook_",
@@ -547,6 +560,9 @@ async def amocrm_webhook(request: Request):
         else:
             form = await request.form()
             data = dict(form)
+
+        # RAW DATA LOGGING
+        print("RAW AMOCRM DATA:", json.dumps(data, ensure_ascii=False))
 
         # ── 2. To'liq log ────────────────────────────────────────────────
         logger.info("=" * 60)
