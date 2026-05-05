@@ -36,6 +36,7 @@ def init_db():
             operator_error TEXT,
             recommendation TEXT,
             next_question TEXT,
+            ready_answer TEXT,
             created_at TEXT
         )
     """)
@@ -51,14 +52,14 @@ def save_analysis(data: dict):
     conn.execute("""
         INSERT INTO lead_analyses
         (lead_id, lead_name, lead_url, phone, operator_name, operator_id,
-         comment, ai_score, lead_status, operator_error, recommendation, next_question, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         comment, ai_score, lead_status, operator_error, recommendation, next_question, ready_answer, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         data.get("lead_id"), data.get("lead_name"), data.get("lead_url"),
         data.get("phone"), data.get("operator_name"), data.get("operator_id"),
         data.get("comment"), data.get("ai_score"), data.get("lead_status"),
         data.get("operator_error"), data.get("recommendation"),
-        data.get("next_question"), now
+        data.get("next_question"), data.get("ready_answer"), now
     ))
     conn.commit()
     conn.close()

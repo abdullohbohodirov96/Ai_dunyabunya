@@ -228,12 +228,14 @@ JSON formati:
   "status": "iliq",
   "operator_error": "Xato tavsifi yoki 'Xato topilmadi'",
   "next_question": "Mijozni gapirtiradigan savol",
-  "recommendation": "Dunyabunya asosida yopish strategiyasi"
+  "recommendation": "Dunyabunya asosida yopish strategiyasi",
+  "ready_answer": "Mijozga yuborish uchun tayyor qisqa javob (copy-paste uchun)"
 }
 
 Qoidalar:
 - status faqat "issiq", "iliq" yoki "sovuq" bo'lishi mumkin.
 - score 1/5 dan 5/5 gacha bo'lishi kerak.
+- ready_answer: qisqa, samimiy va sotuvga yo'naltirilgan bo'lsin.
 - Barcha javoblar o'zbek tilida bo'lsin.
 - Real sotuvchi kabi professional va amaliy maslahat ber.
 - Agar ma'lumot kam bo'lsa ham, mavjud ma'lumotlar asosida eng yaxshi tahlilni ber."""
@@ -245,7 +247,8 @@ def analyze_with_openai(text: str) -> dict:
         "score": "?/5", "status": "noaniq",
         "operator_error": "Aniqlab bo'lmadi",
         "next_question": "Qo'shimcha ma'lumot kerak",
-        "recommendation": "Ma'lumot yetarli emas"
+        "recommendation": "Ma'lumot yetarli emas",
+        "ready_answer": "Assalomu alaykum! Savollaringiz bo'lsa javob berishga tayyormiz."
     }
 
     if not OPENAI_API_KEY:
@@ -278,7 +281,7 @@ def analyze_with_openai(text: str) -> dict:
         logger.info("✅ OpenAI javobi olindi.")
         parsed = json.loads(content)
         # Kerakli kalitlar borligini tekshiramiz
-        for key in ("score", "status", "operator_error", "next_question", "recommendation"):
+        for key in ("score", "status", "operator_error", "next_question", "recommendation", "ready_answer"):
             if key not in parsed:
                 parsed[key] = fallback[key]
         return parsed
@@ -331,8 +334,17 @@ def format_analysis_message(lead: dict, ai: dict) -> str:
     lead_id = lead.get("lead_id") or "—"
     operator = lead.get("operator_name") or lead.get("operator_id") or "—"
 
+    # Urgent Alert tekshiruvi
+    score_val = ai.get("score", "0/5")
+    is_high_score = any(s in score_val for s in ("4/5", "5/5"))
+    is_hot = ai.get("status") == "issiq"
+
+    urgent_prefix = ""
+    if is_high_score or is_hot:
+        urgent_prefix = "🔥🔥🔥 *ISSIQ LEAD! TEZ JAVOB BERING!*\n\n"
+
     lines = [
-        "🔔 *Yangi Lead Tahlili*",
+        urgent_prefix + "🔔 *Yangi Lead Tahlili*",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
         f"👤 *Lead:* {lead_name}",
@@ -358,6 +370,9 @@ def format_analysis_message(lead: dict, ai: dict) -> str:
         f"❌ *Operator xatosi:* {ai.get('operator_error', '—')}",
         f"❓ *Keyingi savol:* {ai.get('next_question', '—')}",
         f"✅ *Tavsiya:* {ai.get('recommendation', '—')}",
+        "",
+        "💬 *Tayyor javob (copy-paste):*",
+        f"`{ai.get('ready_answer', '—')}`",
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         f"📌 _Manba: amoCRM Webhook_",
@@ -601,6 +616,7 @@ async def amocrm_webhook(request: Request):
             "operator_error": ai.get("operator_error"),
             "recommendation": ai.get("recommendation"),
             "next_question": ai.get("next_question"),
+            "ready_answer": ai.get("ready_answer"),
         }
         save_analysis(db_record)
 
