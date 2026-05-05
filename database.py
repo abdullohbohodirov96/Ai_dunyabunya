@@ -21,6 +21,7 @@ def get_db():
 def init_db():
     """Database va jadvallarni yaratish."""
     conn = get_db()
+    # Asosiy analizlar jadvali
     conn.execute("""
         CREATE TABLE IF NOT EXISTS lead_analyses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,9 +41,38 @@ def init_db():
             created_at TEXT
         )
     """)
+    # Dublikatlarni oldini olish jadvali
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS processed_notes (
+            note_id TEXT PRIMARY KEY,
+            created_at TEXT
+        )
+    """)
     conn.commit()
     conn.close()
     logger.info("✅ Database tayyor (sales_data.db)")
+
+
+def is_note_processed(note_id: str) -> bool:
+    """Note allaqachon qayta ishlanganligini tekshiradi."""
+    if not note_id:
+        return False
+    conn = get_db()
+    cursor = conn.execute("SELECT 1 FROM processed_notes WHERE note_id = ?", (note_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+
+def mark_note_as_processed(note_id: str):
+    """Note qayta ishlangan deb belgilaydi."""
+    if not note_id:
+        return
+    conn = get_db()
+    now = datetime.now(UZB_TZ).isoformat()
+    conn.execute("INSERT OR IGNORE INTO processed_notes (note_id, created_at) VALUES (?, ?)", (note_id, now))
+    conn.commit()
+    conn.close()
 
 
 def save_analysis(data: dict):

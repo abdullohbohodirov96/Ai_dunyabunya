@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 
 from database import init_db, save_analysis, get_today_stats, get_operator_stats
 from database import get_leads_by_status, get_top_operators, UZB_TZ
+from database import is_note_processed, mark_note_as_processed
 
 # ─── .env faylni yuklash ──────────────────────────────────────────────────────
 load_dotenv()
@@ -54,12 +55,13 @@ def extract_lead_data(data: dict) -> dict:
     """amoCRM webhook JSON dan lead ma'lumotlarini ajratib oladi."""
     result = {
         "lead_id": None,
-        "lead_name": None,
+        "lead_name": "Yo'q",
         "lead_url": None,
         "operator_name": None,
-        "operator_id": None,
+        "operator_id": "Noma'lum",
         "comment": None,
-        "phone": None,
+        "phone": "Yo'q",
+        "note_id": None,
     }
 
     subdomain = AMOCRM_SUBDOMAIN
@@ -80,7 +82,7 @@ def extract_lead_data(data: dict) -> dict:
                     result["lead_name"] = item.get("name") or result["lead_name"]
                     result["operator_id"] = str(item.get("responsible_user_id", "")) or result["operator_id"]
 
-                    # Custom fields dan telefon olish
+                    # Leads ichidagi custom_fields dan telefon olish
                     for cf in item.get("custom_fields", []):
                         if not isinstance(cf, dict):
                             continue
@@ -88,7 +90,8 @@ def extract_lead_data(data: dict) -> dict:
                         if any(w in fname for w in ("телефон", "phone", "telefon", "mobil")):
                             vals = cf.get("values", [])
                             if vals and isinstance(vals, list):
-                                result["phone"] = vals[0].get("value") if isinstance(vals[0], dict) else str(vals[0])
+                                v = vals[0].get("value") if isinstance(vals[0], dict) else str(vals[0])
+                                if v: result["phone"] = v
 
     # ── Note / comment olish ─────────────────────────────────────────────
     notes = data.get("note") or data.get("notes") or []
@@ -97,39 +100,31 @@ def extract_lead_data(data: dict) -> dict:
     for note in notes:
         if not isinstance(note, dict):
             continue
+        # Note unique ID
+        result["note_id"] = str(note.get("id", "")) or result["note_id"]
+        
         text = note.get("text") or note.get("body") or ""
         if isinstance(text, str) and text.strip():
             result["comment"] = text.strip()
         if not result["lead_id"]:
             result["lead_id"] = str(note.get("entity_id", "")) or result["lead_id"]
+        if not result["operator_id"] or result["operator_id"] == "Noma'lum":
+            result["operator_id"] = str(note.get("responsible_user_id", "")) or result["operator_id"]
+            
         params = note.get("params", {})
         if isinstance(params, dict) and not result["comment"]:
             t = params.get("text", "")
             if isinstance(t, str) and t.strip():
                 result["comment"] = t.strip()
 
-    # ── To'g'ridan-to'g'ri text maydoni ──────────────────────────────────
-    if not result["comment"]:
-        if isinstance(data.get("text"), str) and data["text"].strip():
-            result["comment"] = data["text"].strip()
-
-    # ── Message text (chat webhook) ──────────────────────────────────────
-    if not result["comment"]:
-        msg = data.get("message_text") or ""
-        if not msg:
-            msg_obj = data.get("message", {})
-            if isinstance(msg_obj, dict):
-                msg = msg_obj.get("text", "")
-        if isinstance(msg, str) and msg.strip():
-            result["comment"] = msg.strip()
-
     # ── Kontaktdan telefon olish ─────────────────────────────────────────
     contacts = data.get("contacts", {})
-    if isinstance(contacts, dict) and not result["phone"]:
+    if isinstance(contacts, dict):
         for action in ("add", "update"):
             for item in contacts.get(action, []):
                 if not isinstance(item, dict):
                     continue
+                # Contact ichidagi telefon
                 for cf in item.get("custom_fields", []):
                     if not isinstance(cf, dict):
                         continue
@@ -137,14 +132,18 @@ def extract_lead_data(data: dict) -> dict:
                     if any(w in fname for w in ("телефон", "phone", "telefon")):
                         vals = cf.get("values", [])
                         if vals and isinstance(vals, list):
-                            result["phone"] = vals[0].get("value") if isinstance(vals[0], dict) else str(vals[0])
+                            v = vals[0].get("value") if isinstance(vals[0], dict) else str(vals[0])
+                            if v: result["phone"] = v
 
-    # ── Operator nomi (account.current_user yoki _embedded) ──────────────
+    # ── Operator nomi va ID ─────────────────────────────────────────────
     current_user = account.get("current_user") if isinstance(account, dict) else None
     if isinstance(current_user, dict):
         result["operator_name"] = current_user.get("name") or result["operator_name"]
-        if not result["operator_id"]:
+        if not result["operator_id"] or result["operator_id"] == "Noma'lum":
             result["operator_id"] = str(current_user.get("id", ""))
+
+    if not result["operator_name"]:
+        result["operator_name"] = result["operator_id"]
 
     # ── CRM link yaratish ────────────────────────────────────────────────
     if result["lead_id"] and subdomain:
@@ -179,45 +178,33 @@ def is_valid_comment(comment: str | None) -> bool:
 SYSTEM_PROMPT = """Sen Dunyabunya qurilish materiallari gipermarketi uchun professional sotuv analizatori va sotuvchi yordamchisan.
 
 Biznes yo'nalishi:
-- Qurilish materiallari: bazalt, gipsokarton, profil, kafel, santexnika, pol mahsulotlari, aboy va boshqalar.
-- Maqsad: Leadni sotuvga olib kelish.
-
-Senga operator yozgan izoh beriladi.
+- Qurilish materiallari: bazalt, gipsokarton, profil, kafel, santexnika, pol mahsulotlari, aboy.
 
 Vazifang:
-1. Leadni bahola (1 dan 5 gacha)
-2. Lead holatini aniqla: issiq, iliq yoki sovuq.
-3. Operator xatosini top (savol bermagan, ehtiyoj aniqlamagan va h.k.). Agar xato yo'q bo'lsa "Xato topilmadi" deb yoz.
+1. Leadni bahola (1-5) va holatini aniqla (issiq, iliq, sovuq).
+2. Operator xatosini top. Agar operator hamma narsani to'g'ri qilgan bo'lsa, "Operator to'g'ri ishlagan, qo'shimcha tavsiya kerak emas" deb yoz.
 
 MUHIM QOIDALAR:
-- Umumiy gaplar yozma! Instagram, umumiy xizmatlar yoki mavzuga aloqador bo'lmagan gaplar TAQIQLANADI.
-- Har doim mahsulotga va qurilish kontekstiga yaqin gapir.
-- Agar mijoz "qimmat" desa, MAJBURIY ravishda:
-  → Nasiya taklif qil (3-12 oy).
-  → Arzonroq alternativ variant ayt.
-  → Hajm (necha m²) haqida so'rashni tavsiya qil.
+- Umumiy gaplar yozma! Instagram yoki umumiy xizmatlar haqida gapirish TAQIQLANADI.
+- Agar izohda mahsulot nomi (bazalt, gips, profil va h.k.) bo'lsa, aynan shu mahsulot bo'yicha tahlil qil.
+- Agar izohda "narx berdim" deyilsa, tekshir: qiymat (value) tushuntirilganmi? Follow-up tayinlanganmi?
+- Agar mijoz "hali kelmadi" desa, follow-up tavsiya ber.
+- Agar mijoz "qiziqvoti" desa, sotuvga olib boruvchi aniq qadam ayt.
+- Agar hamma narsa to'g'ri bo'lsa, ortiqcha tavsiya yozma.
+- Keyingi savol HAR DOIM aniq va texnik bo'lsin (masalan: "Necha kvadrat metr kerak?").
+- Tayyor javob faqat haqiqatda kerak bo'lsa yozilsin, bo'lmasa bo'sh qoldir.
 
-4. Keyingi savol HAR DOIM aniq va texnik bo'lsin:
-   Yomon misol: "Sizga nima qiziq?"
-   Yaxshi misol: "Sizga necha kvadrat metr uchun kerak?", "Qaysi turdagi material izlayapsiz?"
-
-5. Tayyor javob: Operator mijozga yuborishi uchun qisqa, samimiy va sotuvga yo'naltirilgan gap bo'lsin.
-
-Sen FAQAT JSON formatda javob ber. Boshqa hech narsa yozma.
-JSON formati:
+Javob formati (JSON):
 {
-  "score": "3/5",
-  "status": "iliq",
-  "operator_error": "Xato tavsifi yoki 'Xato topilmadi'",
-  "next_question": "Aniq va texnik savol",
-  "recommendation": "Dunyabunya asosida aniq strategiya",
-  "ready_answer": "Mijozga yuborish uchun tayyor qisqa javob"
+  "score": "X/5",
+  "status": "issiq/iliq/sovuq",
+  "operator_error": "Xato yoki 'Operator to'g'ri ishlagan...'",
+  "next_question": "Aniq texnik savol",
+  "recommendation": "Qisqa va aniq strategiya",
+  "ready_answer": "Tayyor javob yoki ''"
 }
 
-Qoidalar:
-- Barcha javoblar o'zbek tilida bo'lsin.
-- Real sotuvchi kabi professional va amaliy maslahat ber.
-- Agar ma'lumot kam bo'lsa ham, mavjud ma'lumotlar asosida eng yaxshi tahlilni ber."""
+Faqat o'zbek tilida, maksimal real va ortiqcha gaplarsiz javob ber."""
 
 
 def analyze_with_openai(text: str) -> dict:
@@ -569,6 +556,12 @@ async def amocrm_webhook(request: Request):
 
         # ── 3. Lead ma'lumotlarini ajratish ───────────────────────────────
         lead = extract_lead_data(data)
+        
+        # Unique Note ID bo'yicha dublikat tekshiruvi
+        if lead["note_id"] and is_note_processed(lead["note_id"]):
+            logger.info(f"⏭ Dublikat note o'tkazib yuborildi: {lead['note_id']}")
+            return JSONResponse(status_code=200, content={"status": "duplicate", "message": "Ushbu note allaqachon qayta ishlangan"})
+
         logger.info(f"📊 Ajratilgan: lead_id={lead['lead_id']}, operator={lead['operator_name']}, comment={bool(lead['comment'])}")
 
         # ── 4. Analiz uchun matn tayyorlash ───────────────────────────────
@@ -576,13 +569,16 @@ async def amocrm_webhook(request: Request):
             # Anti-spam filtr
             if not is_valid_comment(lead["comment"]):
                 logger.info(f"🚫 Spam/Qisqa comment filtrlandi: '{lead['comment']}'")
+                if lead["note_id"]: mark_note_as_processed(lead["note_id"])
                 return JSONResponse(status_code=200, content={
                     "status": "filtered",
                     "message": "Spam yoki qisqa comment tahlil qilinmadi"
                 })
             analysis_text = lead["comment"]
         else:
-            analysis_text = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+            # Comment bo'lmasa analiz qilmaslik (User request bo'yicha "1 izoh = 1 xabar")
+            logger.info("ℹ️ Comment topilmadi, analiz qilinmaydi.")
+            return JSONResponse(status_code=200, content={"status": "no_comment", "message": "Izoh yo'q"})
 
         # ── 5. OpenAI analiz (JSON) ───────────────────────────────────────
         ai = analyze_with_openai(analysis_text)
@@ -598,6 +594,10 @@ async def amocrm_webhook(request: Request):
             "ready_answer": ai.get("ready_answer"),
         }
         save_analysis(db_record)
+        
+        # Note ishlov berildi deb belgilash
+        if lead["note_id"]:
+            mark_note_as_processed(lead["note_id"])
 
         # ── 7. Telegram ga yuborish ───────────────────────────────────────
         message = format_analysis_message(lead, ai)
