@@ -153,6 +153,25 @@ def extract_lead_data(data: dict) -> dict:
     return result
 
 
+def is_valid_comment(comment: str | None) -> bool:
+    """Commentni spamga tekshiradi (qisqa yoki ma'nosiz bo'lsa False qaytaradi)."""
+    if not comment:
+        return False
+
+    clean_comment = comment.strip().lower()
+
+    # Taqiqlangan so'zlar / qisqa ma'nosiz xabarlar
+    spam_words = ["ok", "+", "rahmat", "salom", "👍"]
+
+    if clean_comment in spam_words:
+        return False
+
+    if len(clean_comment) < 5:
+        return False
+
+    return True
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # OpenAI analiz (JSON formatda)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -308,18 +327,22 @@ def send_telegram(text: str, chat_id: str = None) -> bool:
 
 def format_analysis_message(lead: dict, ai: dict) -> str:
     """Chiroyli Telegram xabar formatlash."""
+    lead_name = lead.get("lead_name") or "Noma'lum"
+    lead_id = lead.get("lead_id") or "—"
+    operator = lead.get("operator_name") or lead.get("operator_id") or "—"
+
     lines = [
         "🔔 *Yangi Lead Tahlili*",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        f"👤 *Lead:* {lead.get('lead_name') or 'Noma\\'lum'}",
-        f"🆔 *Lead ID:* {lead.get('lead_id') or '—'}",
+        f"👤 *Lead:* {lead_name}",
+        f"🆔 *Lead ID:* {lead_id}",
     ]
     if lead.get("lead_url"):
         lines.append(f"🔗 *CRM:* {lead['lead_url']}")
     if lead.get("phone"):
         lines.append(f"📞 *Telefon:* {lead['phone']}")
-    lines.append(f"👨‍💼 *Operator:* {lead.get('operator_name') or lead.get('operator_id') or '—'}")
+    lines.append(f"👨‍💼 *Operator:* {operator}")
     if lead.get("comment"):
         comment_short = lead["comment"][:150]
         if len(lead["comment"]) > 150:
@@ -370,8 +393,8 @@ def handle_bot_command(text: str, chat_id: str):
             lines = [f"📊 *Bugungi umumiy hisobot*", f"📅 Sana: {now_str}", "━━━━━━━━━━━━━━━━━━━━", ""]
             total_all = 0
             for r in rows:
-                name = r["operator_name"] or "Noma'lum"
-                lines.append(f"👨‍💼 *{name}*")
+                op_name = r["operator_name"] or "Noma'lum"
+                lines.append(f"👨‍💼 *{op_name}*")
                 lines.append(f"   📋 Jami: {r['total']} ta lead")
                 lines.append(f"   🔥 Issiq: {r['issiq']} | 🌤 Iliq: {r['iliq']} | ❄️ Sovuq: {r['sovuq']}")
                 lines.append(f"   ⭐ O'rtacha baho: {r['avg_score']}/5")
@@ -424,7 +447,8 @@ def handle_bot_command(text: str, chat_id: str):
             lines = [f"🏆 *Top operatorlar*", f"📅 Sana: {now_str}", "━━━━━━━━━━━━━━━━━━━━", ""]
             for i, r in enumerate(rows, 1):
                 medal = ["🥇", "🥈", "🥉"][i - 1] if i <= 3 else f"{i}."
-                lines.append(f"{medal} *{r['operator_name'] or 'Noma\\'lum'}*")
+                op_name = r['operator_name'] or "Noma'lum"
+                lines.append(f"{medal} *{op_name}*")
                 lines.append(f"   ⭐ {r['avg_score']}/5 | 📋 {r['total']} lead | 🔥 {r['issiq']} issiq | ❄️ {r['sovuq']} sovuq")
                 lines.append("")
             send_telegram("\n".join(lines), chat_id)
@@ -555,6 +579,13 @@ async def amocrm_webhook(request: Request):
 
         # ── 4. Analiz uchun matn tayyorlash ───────────────────────────────
         if lead["comment"]:
+            # Anti-spam filtr
+            if not is_valid_comment(lead["comment"]):
+                logger.info(f"🚫 Spam/Qisqa comment filtrlandi: '{lead['comment']}'")
+                return JSONResponse(status_code=200, content={
+                    "status": "filtered",
+                    "message": "Spam yoki qisqa comment tahlil qilinmadi"
+                })
             analysis_text = lead["comment"]
         else:
             analysis_text = json.dumps(data, ensure_ascii=False, indent=2, default=str)
