@@ -1,13 +1,10 @@
-"""
-Database modul - SQLite orqali lead analiz natijalarini saqlash va hisobotlar.
-"""
-
 import sqlite3
 import logging
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger("ai_sales_analyzer")
 
+# Asia/Tashkent (UTC+5)
 UZB_TZ = timezone(timedelta(hours=5))
 DB_PATH = "sales_data.db"
 
@@ -69,7 +66,7 @@ def mark_note_as_processed(note_id: str):
     if not note_id:
         return
     conn = get_db()
-    now = datetime.now(UZB_TZ).isoformat()
+    now = datetime.now(UZB_TZ).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute("INSERT OR IGNORE INTO processed_notes (note_id, created_at) VALUES (?, ?)", (note_id, now))
     conn.commit()
     conn.close()
@@ -77,32 +74,40 @@ def mark_note_as_processed(note_id: str):
 
 def save_analysis(data: dict):
     """Analiz natijasini databasega saqlash."""
-    conn = get_db()
-    now = datetime.now(UZB_TZ).isoformat()
-    conn.execute("""
-        INSERT INTO lead_analyses
-        (lead_id, lead_name, lead_url, phone, operator_name, operator_id,
-         comment, ai_score, lead_status, operator_error, recommendation, next_question, ready_answer, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        data.get("lead_id"), data.get("lead_name"), data.get("lead_url"),
-        data.get("phone"), data.get("operator_name"), data.get("operator_id"),
-        data.get("comment"), data.get("ai_score"), data.get("lead_status"),
-        data.get("operator_error"), data.get("recommendation"),
-        data.get("next_question"), data.get("ready_answer"), now
-    ))
-    conn.commit()
-    conn.close()
-    logger.info(f"💾 Analiz databasega saqlandi (lead_id={data.get('lead_id')})")
+    print("SAVING ANALYSIS TO DB:", data)
+    try:
+        conn = get_db()
+        # Asia/Tashkent vaqtini olish
+        now = datetime.now(UZB_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("""
+            INSERT INTO lead_analyses
+            (lead_id, lead_name, lead_url, phone, operator_name, operator_id,
+             comment, ai_score, lead_status, operator_error, recommendation, next_question, ready_answer, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            data.get("lead_id"), data.get("lead_name"), data.get("lead_url"),
+            data.get("phone"), data.get("operator_name"), data.get("operator_id"),
+            data.get("comment"), data.get("ai_score"), data.get("lead_status"),
+            data.get("operator_error"), data.get("recommendation"),
+            data.get("next_question"), data.get("ready_answer"), now
+        ))
+        conn.commit()
+        conn.close()
+        print("DB SAVE SUCCESS")
+        logger.info(f"💾 Analiz databasega saqlandi (lead_id={data.get('lead_id')})")
+    except Exception as e:
+        print(f"❌ DB SAVE ERROR: {e}")
+        logger.error(f"❌ DB SAVE ERROR: {e}")
 
 
 def get_today_stats():
-    """Bugungi barcha operatorlar statistikasi."""
+    """Bugungi barcha operatorlar statistikasi (Asia/Tashkent bo'yicha)."""
     conn = get_db()
     today = datetime.now(UZB_TZ).strftime("%Y-%m-%d")
     cursor = conn.execute("""
         SELECT
             operator_name,
+            operator_id,
             COUNT(*) as total,
             SUM(CASE WHEN lead_status = 'issiq' THEN 1 ELSE 0 END) as issiq,
             SUM(CASE WHEN lead_status = 'iliq' THEN 1 ELSE 0 END) as iliq,
@@ -110,50 +115,92 @@ def get_today_stats():
             ROUND(AVG(CAST(SUBSTR(ai_score, 1, 1) AS REAL)), 1) as avg_score
         FROM lead_analyses
         WHERE created_at LIKE ?
-        GROUP BY operator_name
+        GROUP BY operator_name, operator_id
     """, (f"{today}%",))
     rows = cursor.fetchall()
     conn.close()
     return rows
 
 
-def get_operator_stats(operator_name: str):
-    """Bitta operator bugungi statistikasi."""
+def get_operator_stats(search_term: str, is_id: bool = False):
+    """Bitta operator bugungi statistikasi (Ism yoki ID bo'yicha)."""
     conn = get_db()
     today = datetime.now(UZB_TZ).strftime("%Y-%m-%d")
+    
+    if is_id:
+        where_clause = "operator_id = ?"
+    else:
+        where_clause = "LOWER(operator_name) LIKE ?"
+        search_term = f"%{search_term.lower()}%"
 
-    cursor = conn.execute("""
+    cursor = conn.execute(f"""
         SELECT
+            operator_name,
+            operator_id,
             COUNT(*) as total,
             SUM(CASE WHEN lead_status = 'issiq' THEN 1 ELSE 0 END) as issiq,
             SUM(CASE WHEN lead_status = 'iliq' THEN 1 ELSE 0 END) as iliq,
             SUM(CASE WHEN lead_status = 'sovuq' THEN 1 ELSE 0 END) as sovuq,
             ROUND(AVG(CAST(SUBSTR(ai_score, 1, 1) AS REAL)), 1) as avg_score
         FROM lead_analyses
-        WHERE LOWER(operator_name) LIKE ? AND created_at LIKE ?
-    """, (f"%{operator_name.lower()}%", f"{today}%"))
+        WHERE {where_clause} AND created_at LIKE ?
+    """, (search_term, f"{today}%"))
     stats = cursor.fetchone()
 
-    cursor2 = conn.execute("""
+    if not stats or stats["total"] == 0:
+        conn.close()
+        return None, None, None
+
+    cursor2 = conn.execute(f"""
         SELECT operator_error, COUNT(*) as cnt
         FROM lead_analyses
-        WHERE LOWER(operator_name) LIKE ? AND created_at LIKE ?
+        WHERE {where_clause} AND created_at LIKE ?
             AND operator_error IS NOT NULL AND operator_error != ''
             AND LOWER(operator_error) NOT LIKE '%topilmadi%'
+            AND LOWER(operator_error) NOT LIKE '%to''g'ri ishlagan%'
         GROUP BY operator_error
         ORDER BY cnt DESC LIMIT 3
-    """, (f"%{operator_name.lower()}%", f"{today}%"))
+    """, (search_term, f"{today}%"))
     errors = cursor2.fetchall()
 
-    cursor3 = conn.execute("""
+    cursor3 = conn.execute(f"""
         SELECT recommendation FROM lead_analyses
-        WHERE LOWER(operator_name) LIKE ? AND created_at LIKE ?
+        WHERE {where_clause} AND created_at LIKE ?
         ORDER BY created_at DESC LIMIT 1
-    """, (f"%{operator_name.lower()}%", f"{today}%"))
+    """, (search_term, f"{today}%"))
     last_rec = cursor3.fetchone()
 
     conn.close()
     return stats, errors, last_rec
+
+
+def get_active_operators_today():
+    """Bugun bazaga tushgan operatorlar ro'yxati."""
+    conn = get_db()
+    today = datetime.now(UZB_TZ).strftime("%Y-%m-%d")
+    cursor = conn.execute("""
+        SELECT
+            operator_name,
+            operator_id,
+            COUNT(*) as total
+        FROM lead_analyses
+        WHERE created_at LIKE ?
+        GROUP BY operator_name, operator_id
+        ORDER BY total DESC
+    """, (f"{today}%",))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def get_db_debug_count():
+    """Bugungi jami yozuvlar soni."""
+    conn = get_db()
+    today = datetime.now(UZB_TZ).strftime("%Y-%m-%d")
+    cursor = conn.execute("SELECT COUNT(*) FROM lead_analyses WHERE created_at LIKE ?", (f"{today}%",))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
 
 
 def get_leads_by_status(status: str, limit: int = 10):

@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 
 from database import init_db, save_analysis, get_today_stats, get_operator_stats
 from database import get_leads_by_status, get_top_operators, UZB_TZ
-from database import is_note_processed, mark_note_as_processed
+from database import is_note_processed, mark_note_as_processed, get_active_operators_today, get_db_debug_count
 
 # ─── .env faylni yuklash ──────────────────────────────────────────────────────
 load_dotenv()
@@ -363,12 +363,6 @@ def format_analysis_message(lead: dict, ai: dict) -> str:
 # Telegram Bot Polling (komandalar uchun)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Operator nomlari ro'yxati (komandalar uchun)
-OPERATOR_COMMANDS = {
-    "elmira": "Elmira",
-    "zebo": "Zebo",
-    "ali": "Ali",
-}
 
 
 def handle_bot_command(text: str, chat_id: str):
@@ -377,6 +371,25 @@ def handle_bot_command(text: str, chat_id: str):
     now_str = datetime.now(UZB_TZ).strftime("%d.%m.%Y")
 
     try:
+        # ── /debug_db ────────────────────────────────────────────────────
+        if text == "/debug_db":
+            count = get_db_debug_count()
+            send_telegram(f"🔍 *DB Debug*\n\nBugun bazada jami *{count}* ta yozuv bor.", chat_id)
+            return
+
+        # ── /operatorlar ─────────────────────────────────────────────────
+        if text == "/operatorlar":
+            rows = get_active_operators_today()
+            if not rows:
+                send_telegram(f"👨‍💼 *Operatorlar ({now_str})*\n\nBugun hali hech kim ishlamadi.", chat_id)
+                return
+            lines = [f"👨‍💼 *Bugun ishlagan operatorlar*", "━━━━━━━━━━━━━━━━━━━━", ""]
+            for r in rows:
+                name = r["operator_name"] or "Noma'lum"
+                lines.append(f"• *{name}* (ID: {r['operator_id']}) — {r['total']} ta analiz")
+            send_telegram("\n".join(lines), chat_id)
+            return
+
         # ── /hisobot_bugun ───────────────────────────────────────────────
         if text == "/hisobot_bugun":
             rows = get_today_stats()
@@ -387,8 +400,8 @@ def handle_bot_command(text: str, chat_id: str):
             lines = [f"📊 *Bugungi umumiy hisobot*", f"📅 Sana: {now_str}", "━━━━━━━━━━━━━━━━━━━━", ""]
             total_all = 0
             for r in rows:
-                op_name = r["operator_name"] or "Noma'lum"
-                lines.append(f"👨‍💼 *{op_name}*")
+                name = r["operator_name"] or "Noma'lum"
+                lines.append(f"👨‍💼 *{name}* (ID: {r['operator_id']})")
                 lines.append(f"   📋 Jami: {r['total']} ta lead")
                 lines.append(f"   🔥 Issiq: {r['issiq']} | 🌤 Iliq: {r['iliq']} | ❄️ Sovuq: {r['sovuq']}")
                 lines.append(f"   ⭐ O'rtacha baho: {r['avg_score']}/5")
@@ -398,38 +411,30 @@ def handle_bot_command(text: str, chat_id: str):
             send_telegram("\n".join(lines), chat_id)
             return
 
-        # ── /hisobot_{operator} ──────────────────────────────────────────
-        for cmd_key, display_name in OPERATOR_COMMANDS.items():
-            if text == f"/hisobot_{cmd_key}":
-                stats, errors, last_rec = get_operator_stats(cmd_key)
-                if not stats or stats["total"] == 0:
-                    send_telegram(f"👨‍💼 *{display_name}* - bugun ({now_str}) hali ma'lumot yo'q.", chat_id)
-                    return
-
-                lines = [
-                    f"👨‍💼 *{display_name} - Bugungi hisobot*",
-                    f"📅 Sana: {now_str}",
-                    "━━━━━━━━━━━━━━━━━━━━",
-                    "",
-                    f"📋 *Jami leadlar:* {stats['total']} ta",
-                    f"🔥 *Issiq:* {stats['issiq']} ta",
-                    f"🌤 *Iliq:* {stats['iliq']} ta",
-                    f"❄️ *Sovuq:* {stats['sovuq']} ta",
-                    f"⭐ *O'rtacha baho:* {stats['avg_score']}/5",
-                    "",
-                ]
-
-                if errors:
-                    lines.append("❌ *Eng ko'p xatolar:*")
-                    for i, err in enumerate(errors, 1):
-                        lines.append(f"   {i}. {err['operator_error']} ({err['cnt']} marta)")
-                    lines.append("")
-
-                if last_rec:
-                    lines.append(f"💡 *Oxirgi AI tavsiya:*\n   {last_rec['recommendation']}")
-
-                send_telegram("\n".join(lines), chat_id)
+        # ── /hisobot_id_{id} ─────────────────────────────────────────────
+        if text.startswith("/hisobot_id_"):
+            op_id = text.replace("/hisobot_id_", "").strip()
+            stats, errors, last_rec = get_operator_stats(op_id, is_id=True)
+            if not stats:
+                send_telegram(f"❌ ID: *{op_id}* bo'yicha ma'lumot topilmadi.", chat_id)
                 return
+            _send_op_report(stats, errors, last_rec, chat_id, now_str)
+            return
+
+        # ── /hisobot_{operator} ──────────────────────────────────────────
+        if text.startswith("/hisobot_"):
+            op_name = text.replace("/hisobot_", "").strip()
+            # Maxsus komandalarni o'tkazib yuboramiz
+            if op_name in ["bugun", "top_operatorlar", "sovuq_leadlar", "issiq_leadlar", "id"]:
+                pass # Bularni pastda yoki alohida tekshiramiz
+            else:
+                stats, errors, last_rec = get_operator_stats(op_name)
+                if stats:
+                    _send_op_report(stats, errors, last_rec, chat_id, now_str)
+                    return
+                else:
+                    send_telegram(f"❌ Operator *{op_name}* topilmadi. /operatorlar komandasi orqali ismlarni tekshiring.", chat_id)
+                    return
 
         # ── /top_operatorlar ─────────────────────────────────────────────
         if text == "/top_operatorlar":
@@ -459,7 +464,7 @@ def handle_bot_command(text: str, chat_id: str):
             for r in rows:
                 lines.append(f"• *{r['lead_name'] or 'Nomsiz'}* (ID: {r['lead_id'] or '—'})")
                 lines.append(f"  👨‍💼 {r['operator_name'] or '—'} | ⭐ {r['ai_score']}")
-                if r["phone"]:
+                if r["phone"] and r["phone"] != "Yo'q":
                     lines.append(f"  📞 {r['phone']}")
                 lines.append("")
             send_telegram("\n".join(lines), chat_id)
@@ -476,7 +481,7 @@ def handle_bot_command(text: str, chat_id: str):
             for r in rows:
                 lines.append(f"• *{r['lead_name'] or 'Nomsiz'}* (ID: {r['lead_id'] or '—'})")
                 lines.append(f"  👨‍💼 {r['operator_name'] or '—'} | ⭐ {r['ai_score']}")
-                if r["phone"]:
+                if r["phone"] and r["phone"] != "Yo'q":
                     lines.append(f"  📞 {r['phone']}")
                 lines.append("")
             send_telegram("\n".join(lines), chat_id)
@@ -486,6 +491,35 @@ def handle_bot_command(text: str, chat_id: str):
         logger.error(f"❌ Komanda ishlov berishda xato: {e}")
         logger.error(traceback.format_exc())
         send_telegram(f"⚠️ Xatolik yuz berdi: {e}", chat_id)
+
+
+def _send_op_report(stats, errors, last_rec, chat_id, now_str):
+    """Operator hisobotini formatlab yuborish."""
+    name = stats["operator_name"] or "Noma'lum"
+    lines = [
+        f"👨‍💼 *{name} - Bugungi hisobot*",
+        f"🆔 ID: {stats['operator_id']}",
+        f"📅 Sana: {now_str}",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"📋 *Jami leadlar:* {stats['total']} ta",
+        f"🔥 *Issiq:* {stats['issiq']} ta",
+        f"🌤 *Iliq:* {stats['iliq']} ta",
+        f"❄️ *Sovuq:* {stats['sovuq']} ta",
+        f"⭐ *O'rtacha baho:* {stats['avg_score']}/5",
+        "",
+    ]
+
+    if errors:
+        lines.append("❌ *Eng ko'p xatolar:*")
+        for i, err in enumerate(errors, 1):
+            lines.append(f"   {i}. {err['operator_error']} ({err['cnt']} marta)")
+        lines.append("")
+
+    if last_rec:
+        lines.append(f"💡 *Oxirgi AI tavsiya:*\n   {last_rec['recommendation']}")
+
+    send_telegram("\n".join(lines), chat_id)
 
 
 class TelegramPoller:
