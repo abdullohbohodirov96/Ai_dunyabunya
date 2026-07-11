@@ -2,12 +2,14 @@
 AI Sales Analyzer PRO
 =====================
 amoCRM webhook → OpenAI analiz → SQLite saqlash → Telegram natija + bot komandalar.
+Audio/Voice transkripsiya qo'llab-quvvatlaydi.
 """
 
 import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 import traceback
@@ -15,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 
 from database import init_db, save_analysis, get_today_stats, get_operator_stats
@@ -41,8 +43,8 @@ logger = logging.getLogger("ai_sales_analyzer")
 # ─── FastAPI ilovasi ──────────────────────────────────────────────────────────
 app = FastAPI(
     title="AI Sales Analyzer PRO",
-    description="amoCRM webhook → OpenAI analiz → SQLite → Telegram",
-    version="2.0.0",
+    description="amoCRM webhook → OpenAI analiz → Audio transkripsiya → SQLite → Telegram",
+    version="3.0.0",
 )
 
 
@@ -152,6 +154,42 @@ def extract_lead_data(data: dict) -> dict:
     return result
 
 
+def extract_audio_url(data: dict) -> str | None:
+    """Webhook ma'lumotidan audio fayl URL sini topadi."""
+    # amoCRM note params ichida audio link
+    notes = data.get("note") or data.get("notes") or []
+    if isinstance(notes, dict):
+        notes = [notes]
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
+        # Note type 10 = voice message in amoCRM
+        note_type = note.get("note_type") or note.get("type", "")
+        params = note.get("params", {})
+        if isinstance(params, dict):
+            # amoCRM voice note link
+            link = params.get("link") or params.get("file") or params.get("url") or ""
+            if isinstance(link, str) and link.strip():
+                return link.strip()
+            # Agar unlinked bo'lsa
+            original = params.get("original") or ""
+            if isinstance(original, str) and original.strip():
+                return original.strip()
+        # Bevosita file_name yoki attachment
+        attachment = note.get("attachment") or note.get("file") or ""
+        if isinstance(attachment, str) and attachment.strip():
+            return attachment.strip()
+
+    # message ichida audio
+    msg = data.get("message", {})
+    if isinstance(msg, dict):
+        media = msg.get("media") or msg.get("file") or msg.get("audio") or ""
+        if isinstance(media, str) and media.strip():
+            return media.strip()
+
+    return None
+
+
 def is_valid_comment(comment: str | None) -> bool:
     """Commentni spamga tekshiradi (qisqa yoki ma'nosiz bo'lsa False qaytaradi)."""
     if not comment:
@@ -169,6 +207,85 @@ def is_valid_comment(comment: str | None) -> bool:
         return False
 
     return True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Audio transkripsiya (OpenAI Whisper)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def download_audio(url: str) -> bytes | None:
+    """Audio faylni URL dan yuklab oladi."""
+    try:
+        logger.info(f"🔊 Audio yuklab olinmoqda: {url[:100]}...")
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        logger.info(f"✅ Audio yuklandi: {len(resp.content)} bayt")
+        return resp.content
+    except Exception as e:
+        logger.error(f"❌ Audio yuklashda xato: {e}")
+        return None
+
+
+def transcribe_audio(audio_data: bytes, filename: str = "voice.ogg") -> str | None:
+    """OpenAI Whisper API orqali audio faylni matnga o'giradi."""
+    if not OPENAI_API_KEY:
+        logger.error("❌ OPENAI_API_KEY sozlanmagan! Transkripsiya qilib bo'lmaydi.")
+        return None
+
+    # Fayl kengaytmasidan content-type aniqlash
+    ext = os.path.splitext(filename)[1].lower() or ".ogg"
+    content_types = {
+        ".ogg": "audio/ogg",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".webm": "audio/webm",
+        ".mp4": "audio/mp4",
+        ".mpeg": "audio/mpeg",
+        ".mpga": "audio/mpeg",
+    }
+    ct = content_types.get(ext, "audio/ogg")
+
+    tmp_path = None
+    try:
+        logger.info(f"🎙 Whisper API ga audio yuborilmoqda ({filename}, {len(audio_data)} bayt)...")
+        api_url = "https://api.openai.com/v1/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+
+        # Vaqtinchalik fayl yaratamiz (delete=False chunki o'zimiz o'chiramiz)
+        tmp_fd = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+        tmp_path = tmp_fd.name
+        tmp_fd.write(audio_data)
+        tmp_fd.close()
+
+        with open(tmp_path, "rb") as f:
+            files = {"file": (filename, f, ct)}
+            data = {"model": "whisper-1", "language": "uz"}
+            resp = requests.post(api_url, headers=headers, files=files, data=data, timeout=60)
+
+        resp.raise_for_status()
+        result = resp.json()
+        text = result.get("text", "").strip()
+        logger.info(f"✅ Transkripsiya tayyor: {text[:150]}")
+        return text if text else None
+
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"❌ Whisper API HTTP xatosi: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"   Javob: {e.response.text[:300]}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ Transkripsiya xatosi: {e}")
+        logger.error(traceback.format_exc())
+        return None
+    finally:
+        # Vaqtinchalik faylni o'chirish
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -575,10 +692,12 @@ async def root():
     """Health check endpoint."""
     return {
         "status": "✅ AI Sales Analyzer ishlayapti",
-        "version": "2.0.0",
+        "version": "3.0.0",
+        "features": ["amoCRM webhook", "OpenAI analiz", "Audio transkripsiya (Whisper)", "Telegram bot"],
         "endpoints": {
             "health": "GET /",
             "webhook": "POST /webhook/amocrm",
+            "audio": "POST /webhook/audio",
         },
     }
 
@@ -613,6 +732,21 @@ async def amocrm_webhook(request: Request):
             return JSONResponse(status_code=200, content={"status": "duplicate", "message": "Ushbu note allaqachon qayta ishlangan"})
 
         logger.info(f"📊 Ajratilgan: lead_id={lead['lead_id']}, operator={lead['operator_name']}, comment={bool(lead['comment'])}")
+
+        # ── 3.5. Audio transkripsiya ──────────────────────────────────────
+        audio_url = extract_audio_url(data)
+        if audio_url and not lead["comment"]:
+            logger.info(f"🔊 Audio topildi, transkripsiya qilinmoqda...")
+            audio_data = download_audio(audio_url)
+            if audio_data:
+                transcription = transcribe_audio(audio_data)
+                if transcription:
+                    lead["comment"] = f"[🎙 Audio transkripsiya]: {transcription}"
+                    logger.info(f"✅ Transkripsiya: {transcription[:150]}")
+                else:
+                    logger.warning("⚠️ Audio transkripsiya bo'sh qaytdi.")
+            else:
+                logger.warning("⚠️ Audio yuklab olinmadi.")
 
         # ── 4. Analiz uchun matn tayyorlash ───────────────────────────────
         if lead["comment"]:
@@ -668,6 +802,79 @@ async def amocrm_webhook(request: Request):
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
+@app.post("/webhook/audio")
+async def audio_webhook(file: UploadFile = File(...),
+                        lead_id: str = "—",
+                        lead_name: str = "Noma'lum",
+                        phone: str = "Yo'q",
+                        operator_name: str = "Noma'lum",
+                        operator_id: str = "—",
+                        lead_url: str = "—"):
+    """
+    Audio faylni to'g'ridan-to'g'ri yuklash va analiz qilish endpointi.
+    Faylni multipart/form-data orqali yuboring:
+      curl -X POST .../webhook/audio -F file=@voice.ogg
+    """
+    try:
+        # Faylni o'qish
+        audio_data = await file.read()
+        filename = file.filename or "voice.ogg"
+        logger.info(f"🔊 Audio fayl qabul qilindi: {filename} ({len(audio_data)} bayt)")
+        print(f"AUDIO UPLOAD: {filename}, {len(audio_data)} bytes")
+
+        if len(audio_data) < 100:
+            return JSONResponse(status_code=400, content={"status": "error", "message": "Audio fayl juda kichik yoki bo'sh."})
+
+        # Transkripsiya
+        transcription = transcribe_audio(audio_data, filename)
+        if not transcription:
+            return JSONResponse(status_code=500, content={"status": "error", "message": "Audio transkripsiya qilib bo'lmadi."})
+
+        print(f"TRANSCRIPTION: {transcription}")
+
+        # Analiz
+        ai = analyze_with_openai(transcription)
+
+        # Lead ma'lumotlari
+        lead = {
+            "lead_id": lead_id,
+            "lead_name": lead_name,
+            "phone": phone,
+            "operator_name": operator_name,
+            "operator_id": operator_id,
+            "lead_url": lead_url,
+            "comment": f"[🎙 Audio transkripsiya]: {transcription}",
+            "note_id": None,
+        }
+
+        # DB saqlash
+        db_record = {
+            **lead,
+            "ai_score": ai.get("score"),
+            "lead_status": ai.get("status"),
+            "operator_error": ai.get("operator_error"),
+            "recommendation": ai.get("recommendation"),
+            "next_question": ai.get("next_question"),
+            "ready_answer": ai.get("ready_answer"),
+        }
+        save_analysis(db_record)
+
+        message = format_analysis_message(lead, ai)
+        sent = send_telegram(message)
+
+        return JSONResponse(status_code=200, content={
+            "status": "success",
+            "transcription": transcription,
+            "analysis": ai,
+            "telegram_sent": sent,
+        })
+
+    except Exception as e:
+        logger.error(f"❌ Audio webhook xato: {e}")
+        logger.error(traceback.format_exc())
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Startup / Shutdown
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -676,7 +883,7 @@ async def amocrm_webhook(request: Request):
 @app.on_event("startup")
 async def startup_event():
     """Ilova ishga tushganda: DB yaratish, sozlamalarni tekshirish, bot polling boshlash."""
-    logger.info("🚀 AI Sales Analyzer PRO ishga tushmoqda...")
+    logger.info("🚀 AI Sales Analyzer PRO v3.0 ishga tushmoqda...")
 
     # Database yaratish
     init_db()
@@ -700,6 +907,7 @@ async def startup_event():
     bot_poller.start()
 
     logger.info("📡 Webhook: https://YOUR-APP.onrender.com/webhook/amocrm")
+    logger.info("🔊 Audio: https://YOUR-APP.onrender.com/webhook/audio")
 
 
 @app.on_event("shutdown")
